@@ -16,6 +16,7 @@ var path = require('path')
 var messages = require('./lib/messages')
 var stat = require('./lib/stat')
 var cursor = require('./lib/cursor')
+var { extendCb, extendStack } = require('extend-stack')
 
 var DEFAULT_FMODE = (4 | 2 | 0) << 6 | ((4 | 0 | 0) << 3) | (4 | 0 | 0) // rw-r--r--
 var DEFAULT_DMODE = (4 | 2 | 1) << 6 | ((4 | 0 | 1) << 3) | (4 | 0 | 1) // rwxr-xr-x
@@ -77,19 +78,19 @@ function Hyperdrive (storage, key, opts) {
   this.metadata.on('append', update)
   this.metadata.on('error', onerror)
   this.ready = thunky(open)
-  this.ready(onready)
+  this.ready(extendCb(onready))
 
   function onready (err) {
-    if (err) return onerror(err)
+    if (err) return onerror(extendStack(err))
     self.emit('ready')
     self._oncontent()
     if (self.latest && !self.metadata.writable) {
-      self._trackLatest(onerror)
+      self._trackLatest(extendCb(onerror))
     }
   }
 
   function onerror (err) {
-    if (err) self.emit('error', err)
+    if (err) self.emit('error', extendStack(err))
   }
 
   function update () {
@@ -97,7 +98,7 @@ function Hyperdrive (storage, key, opts) {
   }
 
   function open (cb) {
-    self._open(cb)
+    self._open(extendCb(cb))
   }
 }
 
@@ -126,14 +127,14 @@ Hyperdrive.prototype._oncontent = function () {
 Hyperdrive.prototype._trackLatest = function (cb) {
   var self = this
 
-  this.ready(function (err) {
+  this.ready(extendCb(function (err) {
     if (err) return cb(err)
 
     self._latestStorage.read(0, 8, function (_, data) {
       self._latestVersion = data ? uint64be.decode(data) : 0
       loop()
     })
-  })
+  }))
 
   function loop (err) {
     if (err) return cb(err)
@@ -141,34 +142,34 @@ Hyperdrive.prototype._trackLatest = function (cb) {
     if (stableVersion()) return fetch()
 
     // TODO: lock downloading while doing this
-    self._clearDangling(self._latestVersion, self.version, onclear)
+    self._clearDangling(self._latestVersion, self.version, extendCb(onclear))
   }
 
   function fetch () {
     if (self.sparse) {
-      if (stableVersion()) return self.metadata.update(loop)
+      if (stableVersion()) return self.metadata.update(extendCb(loop))
       return loop(null)
     }
 
     self.emit('syncing')
-    self._fetchVersion(self._latestSynced, function (err, fullySynced) {
+    self._fetchVersion(self._latestSynced, extendCb(function (err, fullySynced) {
       if (err) return cb(err)
 
       if (fullySynced) {
         self._latestSynced = self._latestVersion
         self.emit('sync')
-        if (!self._checkout) self.metadata.update(loop) // TODO: only if live
+        if (!self._checkout) self.metadata.update(extendCb(loop)) // TODO: only if live
         return
       }
 
       loop(null)
-    })
+    }))
   }
 
   function onclear (err, version) {
     if (err) return cb(err)
     self._latestVersion = version
-    self._latestStorage.write(0, uint64be.encode(self._latestVersion), loop)
+    self._latestStorage.write(0, uint64be.encode(self._latestVersion), extendCb(loop))
   }
 
   function stableVersion () {
@@ -197,14 +198,14 @@ Hyperdrive.prototype._fetchVersion = function (prev, cb) {
     kick()
   })
 
-  this._ensureContent(function (err) {
+  this._ensureContent(extendCb(function (err) {
     if (err) return cb(err)
     if (updated) return cb(null, false)
 
     // var snapshot = self.checkout(version)
     stream = self.tree.checkout(prev).diff(version, {puts: true, dels: false})
-    each(stream, ondata, ondone)
-  })
+    each(stream, ondata, extendCb(ondone))
+  }))
 
   function ondata (data, next) {
     if (updated || error) return callAndKick(next, new Error('Out of date'))
@@ -221,7 +222,7 @@ Hyperdrive.prototype._fetchVersion = function (prev, cb) {
     if (start === end) return callAndKick(next, null)
 
     queued++
-    self.content.download({start: start, end: end}, function (err) {
+    self.content.download({start: start, end: end}, extendCb(function (err) {
       if (updated && !waitingCallback) return kick()
       if (!updated) queued--
 
@@ -235,11 +236,11 @@ Hyperdrive.prototype._fetchVersion = function (prev, cb) {
 
       if (err) {
         stream.destroy(err)
-        error = err
+        error = extendStack(err)
       }
 
       kick()
-    })
+    }))
 
     process.nextTick(next)
   }
@@ -260,7 +261,7 @@ Hyperdrive.prototype._fetchVersion = function (prev, cb) {
   }
 
   function ondone (err) {
-    if (err) error = err
+    if (err) error = extendStack(err)
     done = true
     kick()
   }
@@ -272,7 +273,7 @@ Hyperdrive.prototype._clearDangling = function (a, b, cb) {
   var stream = current.diff(latest, {dels: true, puts: false})
   var self = this
 
-  this._ensureContent(oncontent)
+  this._ensureContent(extendCb(oncontent))
 
   function done (err) {
     if (err) return cb(err)
@@ -281,13 +282,13 @@ Hyperdrive.prototype._clearDangling = function (a, b, cb) {
 
   function oncontent (err) {
     if (err) return cb(err)
-    each(stream, ondata, done)
+    each(stream, ondata, extendCb(done))
   }
 
   function ondata (data, next) {
     var st = data.value
     self.content.cancel(st.offset, st.offset + st.blocks)
-    self.content.clear(st.offset, st.offset + st.blocks, {byteOffset: st.byteOffset, byteLength: st.size}, next)
+    self.content.clear(st.offset, st.offset + st.blocks, {byteOffset: st.byteOffset, byteLength: st.size}, extendCb(next))
   }
 }
 
@@ -299,7 +300,7 @@ Hyperdrive.prototype.replicate = function (opts) {
   var self = this
   var stream = this.metadata.replicate(opts)
 
-  this._ensureContent(function (err) {
+  this._ensureContent(extendCb(function (err) {
     if (err) return stream.destroy(err)
     if (stream.destroyed) return
     self.content.replicate({
@@ -308,7 +309,7 @@ Hyperdrive.prototype.replicate = function (opts) {
       upload: opts.upload,
       stream: stream
     })
-  })
+  }))
 
   return stream
 }
@@ -336,18 +337,18 @@ Hyperdrive.prototype.download = function (dir, cb) {
   download(dir || '/')
 
   function download (entry) {
-    self.stat(entry, function (err, stat) {
+    self.stat(entry, extendCb(function (err, stat) {
       if (err) {
         if (cb) cb(err)
         return
       }
       if (stat.isDirectory()) return downloadDir(entry, stat)
       if (stat.isFile()) return downloadFile(entry, stat)
-    })
+    }))
   }
 
   function downloadDir (dirname, stat) {
-    self.readdir(dirname, function (err, entries) {
+    self.readdir(dirname, extendCb(function (err, entries) {
       if (err) {
         if (cb) cb(err)
         return
@@ -358,7 +359,7 @@ Hyperdrive.prototype.download = function (dir, cb) {
         download(path.join(dirname, entry))
       })
       if (downloadCount <= 0 && cb) cb()
-    })
+    }))
   }
 
   function downloadFile (entry, stat) {
@@ -390,7 +391,7 @@ Hyperdrive.prototype.open = function (name, flags, mode, opts, cb) {
   var cursor = this.createCursor(name, opts)
   var self = this
 
-  cursor.open(function (err) {
+  cursor.open(extendCb(function (err) {
     if (err) return cb(err)
 
     var fd = self._openFiles.indexOf(null)
@@ -398,7 +399,7 @@ Hyperdrive.prototype.open = function (name, flags, mode, opts, cb) {
 
     self._openFiles[fd] = cursor
     cb(null, fd + 20) // offset all fds with 20, unsure what the actual good offset is
-  })
+  }))
 }
 
 Hyperdrive.prototype.read = function (fd, buf, offset, len, pos, cb) {
@@ -407,7 +408,7 @@ Hyperdrive.prototype.read = function (fd, buf, offset, len, pos, cb) {
 
   if (pos !== null) cursor.seek(pos)
 
-  cursor.next(function (err, next) {
+  cursor.next(extendCb(function (err, next) {
     if (err) return cb(err)
 
     if (!next) return cb(null, 0, buf)
@@ -420,7 +421,7 @@ Hyperdrive.prototype.read = function (fd, buf, offset, len, pos, cb) {
 
     next.copy(buf, offset, 0, len)
     cb(null, next.length, buf)
-  })
+  }))
 }
 
 // TODO: move to ./lib
@@ -456,7 +457,7 @@ Hyperdrive.prototype.createReadStream = function (name, opts) {
     if (first) return open(size, cb)
     if (start === end || length === 0) return cb(null, null)
 
-    self.content.get(start++, {wait: !downloaded && !cached}, function (err, data) {
+    self.content.get(start++, {wait: !downloaded && !cached}, extendCb(function (err, data) {
       if (err) return cb(err)
       if (offset) data = data.slice(offset)
       offset = 0
@@ -465,17 +466,17 @@ Hyperdrive.prototype.createReadStream = function (name, opts) {
         length -= data.length
       }
       cb(null, data)
-    })
+    }))
   }
 
   function open (size, cb) {
     first = false
-    self._ensureContent(function (err) {
+    self._ensureContent(extendCb(function (err) {
       if (err) return cb(err)
 
       // if running latest === true and a delete happens while getting the tree data, the tree.get
       // should finish before the delete so there shouldn't be an rc. we should test this though.
-      self.tree.get(name, ontree)
+      self.tree.get(name, extendCb(ontree))
 
       function ontree (err, stat) {
         if (err) return cb(err)
@@ -487,7 +488,7 @@ Hyperdrive.prototype.createReadStream = function (name, opts) {
         var byteOffset = stat.byteOffset
         var missing = 1
 
-        if (opts.start) self.content.seek(byteOffset + opts.start, {start: start, end: end}, onstart)
+        if (opts.start) self.content.seek(byteOffset + opts.start, {start: start, end: end}, extendCb(onstart))
         else onstart(null, start, 0)
 
         function onend (err, index) {
@@ -496,7 +497,7 @@ Hyperdrive.prototype.createReadStream = function (name, opts) {
 
           missing++
           self.content.undownload(range)
-          range = self.content.download({start: start, end: index, linear: true}, ondownload)
+          range = self.content.download({start: start, end: index, linear: true}, extendCb(ondownload))
         }
 
         function onstart (err, index, off) {
@@ -505,10 +506,10 @@ Hyperdrive.prototype.createReadStream = function (name, opts) {
 
           offset = off
           start = index
-          range = self.content.download({start: start, end: end, linear: true}, ondownload)
+          range = self.content.download({start: start, end: end, linear: true}, extendCb(ondownload))
 
           if (length > -1 && length < stat.size) {
-            self.content.seek(byteOffset + length, {start: start, end: end}, onend)
+            self.content.seek(byteOffset + length, {start: start, end: end}, extendCb(onend))
           }
 
           read(size, cb)
@@ -520,7 +521,7 @@ Hyperdrive.prototype.createReadStream = function (name, opts) {
           else downloaded = true
         }
       }
-    })
+    }))
   }
 }
 
@@ -531,11 +532,11 @@ Hyperdrive.prototype.readFile = function (name, opts, cb) {
 
   name = unixify(name)
 
-  collect(this.createReadStream(name, opts), function (err, bufs) {
+  collect(this.createReadStream(name, opts), extendCb(function (err, bufs) {
     if (err) return cb(err)
     var buf = bufs.length === 1 ? bufs[0] : Buffer.concat(bufs)
     cb(null, opts.encoding && opts.encoding !== 'binary' ? buf.toString(opts.encoding) : buf)
-  })
+  }))
 }
 
 Hyperdrive.prototype.createWriteStream = function (name, opts) {
@@ -549,7 +550,7 @@ Hyperdrive.prototype.createWriteStream = function (name, opts) {
   // TODO: support piping through a "split" stream like rabin
 
   proxy.setReadable(false)
-  this._ensureContent(function (err) {
+  this._ensureContent(extendCb(function (err) {
     if (err) return proxy.destroy(err)
     if (self._checkout) return proxy.destroy(new Error('Cannot write to a checkout'))
     if (proxy.destroyed) return
@@ -557,12 +558,12 @@ Hyperdrive.prototype.createWriteStream = function (name, opts) {
     self._lock(function (release) {
       if (!self.latest || proxy.destroyed) return append(null)
 
-      self.tree.get(name, function (err, st) {
+      self.tree.get(name, extendCb(function (err, st) {
         if (err && err.notFound) return append(null)
         if (err) return append(err)
         if (!st.size) return append(null)
-        self.content.clear(st.offset, st.offset + st.blocks, append)
-      })
+        self.content.clear(st.offset, st.offset + st.blocks, extendCb(append))
+      }))
 
       function append (err) {
         if (err) proxy.destroy(err)
@@ -595,11 +596,11 @@ Hyperdrive.prototype.createWriteStream = function (name, opts) {
           }
 
           proxy.cork()
-          self.tree.put(name, st, function (err) {
+          self.tree.put(name, st, extendCb(function (err) {
             if (err) return proxy.destroy(err)
             self.emit('append', name, opts)
             proxy.uncork()
-          })
+          }))
         })
       }
 
@@ -609,7 +610,7 @@ Hyperdrive.prototype.createWriteStream = function (name, opts) {
         release()
       }
     })
-  })
+  }))
 
   return proxy
 }
@@ -625,7 +626,7 @@ Hyperdrive.prototype.writeFile = function (name, buf, opts, cb) {
 
   var bufs = split(buf) // split the input incase it is a big buffer.
   var stream = this.createWriteStream(name, opts)
-  stream.on('error', cb)
+  stream.on('error', extendCb(cb))
   stream.on('finish', cb)
   for (var i = 0; i < bufs.length; i++) stream.write(bufs[i])
   stream.end()
@@ -641,7 +642,7 @@ Hyperdrive.prototype.mkdir = function (name, opts, cb) {
 
   var self = this
 
-  this.ready(function (err) {
+  this.ready(extendCb(function (err) {
     if (err) return cb(err)
     if (self._checkout) return cb(new Error('Cannot write to a checkout'))
 
@@ -656,29 +657,27 @@ Hyperdrive.prototype.mkdir = function (name, opts, cb) {
         byteOffset: self.content.byteLength
       }
 
-      self.tree.put(name, st, function (err) {
+      self.tree.put(name, st, extendCb(function (err) {
         release(cb, err)
-      })
+      }))
     })
-  })
+  }))
 }
 
 Hyperdrive.prototype._statDirectory = function (name, opts, cb) {
-  this.tree.list(name, opts, function (err, list) {
+  this.tree.list(name, opts, extendCb(function (err, list) {
     if (name !== '/' && (err || !list.length)) return cb(err || new Error(name + ' could not be found'))
     var st = stat()
     st.mode = stat.IFDIR | DEFAULT_DMODE
     cb(null, st)
-  })
+  }))
 }
 
 Hyperdrive.prototype.access = function (name, opts, cb) {
   if (typeof opts === 'function') return this.access(name, null, opts)
   if (!opts) opts = {}
   name = unixify(name)
-  this.stat(name, opts, function (err) {
-    cb(err)
-  })
+  this.stat(name, opts, extendCb(cb))
 }
 
 Hyperdrive.prototype.exists = function (name, opts, cb) {
@@ -696,16 +695,16 @@ Hyperdrive.prototype.lstat = function (name, opts, cb) {
 
   name = unixify(name)
 
-  this.tree.get(name, opts, function (err, st) {
+  this.tree.get(name, opts, extendCb(function (err, st) {
     if (err) return self._statDirectory(name, opts, cb)
     cb(null, stat(st))
-  })
+  }))
 }
 
 Hyperdrive.prototype.stat = function (name, opts, cb) {
   if (typeof opts === 'function') return this.stat(name, null, opts)
   if (!opts) opts = {}
-  this.lstat(name, opts, cb)
+  this.lstat(name, opts, extendCb(cb))
 }
 
 Hyperdrive.prototype.readdir = function (name, opts, cb) {
@@ -713,8 +712,8 @@ Hyperdrive.prototype.readdir = function (name, opts, cb) {
 
   name = unixify(name)
 
-  if (name === '/') return this._readdirRoot(opts, cb) // TODO: should be an option in append-tree prob
-  this.tree.list(name, opts, cb)
+  if (name === '/') return this._readdirRoot(opts, extendCb(cb)) // TODO: should be an option in append-tree prob
+  this.tree.list(name, opts, extendCb(cb))
 }
 
 Hyperdrive.prototype._readdirRoot = function (opts, cb) {
@@ -736,25 +735,25 @@ Hyperdrive.prototype.rmdir = function (name, cb) {
 
   var self = this
 
-  this.readdir(name, function (err, list) {
+  this.readdir(name, extendCb(function (err, list) {
     if (err) return cb(err)
     if (list.length) return cb(new Error('Directory is not empty'))
     self._del(name, cb)
-  })
+  }))
 }
 
 Hyperdrive.prototype._del = function (name, cb) {
   var self = this
 
-  this._ensureContent(function (err) {
+  this._ensureContent(extendCb(function (err) {
     if (err) return cb(err)
 
     self._lock(function (release) {
       if (!self.latest) return del(null)
-      self.tree.get(name, function (err, value) {
+      self.tree.get(name, extendCb(function (err, value) {
         if (err) return done(err)
-        self.content.clear(value.offset, value.offset + value.blocks, del)
-      })
+        self.content.clear(value.offset, value.offset + value.blocks, extendCb(del))
+      }))
 
       function del (err) {
         if (err) return done(err)
@@ -765,14 +764,14 @@ Hyperdrive.prototype._del = function (name, cb) {
         release(cb, err)
       }
     })
-  })
+  }))
 }
 
 Hyperdrive.prototype._closeFile = function (fd, cb) {
   var cursor = this._openFiles[fd - 20]
   if (!cursor) return cb(new Error('Bad file descriptor'))
   this._openFiles[fd - 20] = null
-  cursor.close(cb)
+  cursor.close(extendCb(cb))
 }
 
 Hyperdrive.prototype.close = function (fd, cb) {
@@ -781,55 +780,56 @@ Hyperdrive.prototype.close = function (fd, cb) {
   if (!cb) cb = noop
 
   var self = this
-  this.ready(function (err) {
+  this.ready(extendCb(function (err) {
     if (err) return cb(err)
-    self.metadata.close(function (err) {
+    self._closed = true
+    self.metadata.close(extendCb(function (err) {
       if (!self.content) return cb(err)
-      self.content.close(cb)
-    })
-  })
+      self.content.close(extendCb(cb))
+    }))
+  }))
 }
 
 Hyperdrive.prototype._ensureContent = function (cb) {
   var self = this
 
-  this.ready(function (err) {
+  this.ready(extendCb(function (err) {
     if (err) return cb(err)
-    if (!self.content) return self._loadIndex(cb)
+    if (!self.content) return self._loadIndex(extendCb(cb))
     cb(null)
-  })
+  }))
 }
 
 Hyperdrive.prototype._loadIndex = function (cb) {
   var self = this
 
-  if (this._checkout) this._checkout._loadIndex(done)
-  else this.metadata.get(0, {valueEncoding: messages.Index}, done)
+  if (this._checkout) this._checkout._loadIndex(extendCb(done))
+  else this.metadata.get(0, {valueEncoding: messages.Index}, extendCb(done))
 
   function done (err, index) {
     if (err) return cb(err)
-    if (self.content) return self.content.ready(cb)
+    if (self.content) return self.content.ready(extendCb(cb))
 
     var keyPair = self.metadata.writable && contentKeyPair(self.metadata.secretKey)
     var opts = contentOptions(self, keyPair && keyPair.secretKey)
     self.content = self._checkout ? self._checkout.content : hypercore(self._storages.content, index.content, opts)
     self.content.on('error', function (err) {
-      self.emit('error', err)
+      self.emit('error', extendStack(err))
     })
-    self.content.ready(function (err) {
+    self.content.ready(extendCb(function (err) {
       if (err) return cb(err)
       self._oncontent()
       cb()
-    })
+    }))
   }
 }
 
 Hyperdrive.prototype._open = function (cb) {
   var self = this
 
-  this.tree.ready(function (err) {
+  this.tree.ready(extendCb(function (err) {
     if (err) return cb(err)
-    self.metadata.ready(function (err) {
+    self.metadata.ready(extendCb(function (err) {
       if (err) return cb(err)
       if (self.content) return cb(null)
 
@@ -838,31 +838,31 @@ Hyperdrive.prototype._open = function (cb) {
 
       if (!self.metadata.writable || self._checkout) onnotwriteable()
       else onwritable()
-    })
-  })
+    }))
+  }))
 
   function onnotwriteable () {
-    if (self.metadata.has(0)) return self._loadIndex(cb)
+    if (self.metadata.has(0)) return self._loadIndex(extendCb(cb))
     self._loadIndex(noop)
     cb()
   }
 
   function onwritable () {
     var wroteIndex = self.metadata.has(0)
-    if (wroteIndex) return self._loadIndex(cb)
+    if (wroteIndex) return self._loadIndex(extendCb(cb))
 
     if (!self.content) {
       var keyPair = contentKeyPair(self.metadata.secretKey)
       var opts = contentOptions(self, keyPair.secretKey)
       self.content = hypercore(self._storages.content, keyPair.publicKey, opts)
       self.content.on('error', function (err) {
-        self.emit('error', err)
+        self.emit('error', extendStack(err))
       })
     }
 
     self.content.ready(function () {
       if (self.metadata.has(0)) return cb(new Error('Index already written'))
-      self.metadata.append(messages.Index.encode({type: 'hyperdrive', content: self.content.key}), cb)
+      self.metadata.append(messages.Index.encode({type: 'hyperdrive', content: self.content.key}), extendCb(cb))
     })
   }
 }
